@@ -38,14 +38,18 @@ np.add(a, 1, out=a)
 print(a)
 print(b)
 '''
-x = torch.ones(2, 2, requires_grad=True) #张量是否需要求导梯度有无
+x = torch.ones(2, 2, requires_grad=True) #当设置它的属性 .requires_grad=True，那么就会开始追踪在该变量上的所有操作，而完成计算后，可以调用 .backward() 并自动计算所有的梯度，得到的梯度都保存在属性 .grad 中。
 print(x)
 y = x - 2
-print(y)
-print(x.requires_grad)
-print(y.grad_fn) #was created as a result of an operation
-with torch.no_grad():
-    print((x ** 2).requires_grad)
+#print(x.requires_grad)
+#print(y.grad_fn) #was created as a result of an operation
+#with torch.no_grad():  #希望防止跟踪历史
+#    print((x ** 2).requires_grad)
 x.requires_grad_(True)
-y.backward()
+#out = y.mean()
+#out.backward()
+v = torch.tensor([[1., 1.],[1., 1.]], dtype=torch.float)
+y.backward(v)
 print(y)
+# 输出梯度 d(out)/dx
+print(x.grad)
