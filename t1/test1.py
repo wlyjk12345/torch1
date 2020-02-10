@@ -9,6 +9,7 @@ x = x.new_ones(5, 3, dtype=torch.double)      # new_* methods take in sizes 全�
 x = torch.randn_like(x, dtype=torch.float)    # override dtype! # result has the same size
 print(x.size())
 print(x.type())
+print(x.item())    #打印数字
 # add operation
 y = torch.rand(5, 3)
 result = torch.empty(5, 3)
