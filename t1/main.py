@@ -5,7 +5,8 @@ import torchvision as tv
 import tqdm
 from model import NetG, NetD
 from torchnet.meter import AverageValueMeter
-
+from torch.autograd import Variable
+import numpy as np
 
 class Config(object):
     data_path = 'data/'  # 数据集存放路径
@@ -15,8 +16,8 @@ class Config(object):
     max_epoch = 200
     lr1 = 2e-4  # 生成器的学习率
     lr2 = 2e-4  # 判别器的学习率
-    beta1 = 0.5  # Adam优化器的beta1参数
-    gpu = False  # 是否使用GPU
+    beta1 = 0.9  #  RMSprop优化器的alphe参数
+    gpu = True  # 是否使用GPU
     nz = 100  # 噪声维度
     ngf = 64  # 生成器feature map数
     ndf = 64  # 判别器feature map数
@@ -31,10 +32,17 @@ class Config(object):
     d_every = 1  # 每1个batch训练一次判别器
     g_every = 5  # 每5个batch训练一次生成器
     save_every = 10# 没10个epoch保存一次模型
-    save_new = 200
-    netd_path = 'checkpoints/netd_%s.pth' %save_new#'checkpoints/netd_200.pth'   # 'checkpoints/netd_.pth' #预训练模型
-    netg_path = 'checkpoints/netg_%s.pth' %save_new#'checkpoints/netg_200.pth'    # 'checkpoints/netg_211.pth'
-
+    save_new = None
+    netd_path = None
+    netg_path = None
+    '''
+    if save_new :
+        netd_path = None
+        netg_path = None
+    else :
+        netd_path = 'checkpoints/netd_%s.pth' %save_new  #'#'checkpoints/netd_%s.pth' %save_new#'checkpoints/netd_%s.pth' %save_new#'checkpoints/netd_200.pth'   # 'checkpoints/netd_.pth' #预训练模型
+        netg_path = 'checkpoints/netg_%s.pth' %save_new  #'#'checkpoints/netg_%s.pth' %save_new#'checkpoints/netg_%s.pth' %save_new#'checkpoints/netg_200.pth'    # 'checkpoints/netg_211.pth'
+    '''
     # 只测试不训练
     gen_img = 'result.png'
     # 从512张生成的图片中保存最好的64张
@@ -46,6 +54,27 @@ class Config(object):
 
 opt = Config()
 
+def compute_gradient_penalty(D, real_samples, fake_samples):
+
+    alpha = t.rand((opt.batch_size, 1, 1, 1))
+    if opt.gpu:
+        alpha = alpha.cuda()
+    # Get random interpolation between real and fake samples
+    interpolates = (alpha * real_samples + ((1 - alpha) * fake_samples)).requires_grad_(True)
+    d_interpolates =D(interpolates)
+    #fake = Variable(t(opt.batch_size, 1).fill_(1.0), requires_grad=False)
+    # Get gradient w.r.t. interpolates
+    gradients = t.autograd.grad(
+        outputs=d_interpolates,
+        inputs=interpolates,
+        grad_outputs=t.ones(d_interpolates.size()).cuda(),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+    gradients = gradients.view(gradients.size(0), -1)
+    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+    return gradient_penalty
 
 def train(**kwargs):
     for k_, v_ in kwargs.items():
@@ -83,16 +112,20 @@ def train(**kwargs):
     netg.to(device)
 
     # 定义优化器和损失
-    optimizer_g = t.optim.Adam(netg.parameters(), opt.lr1, betas=(opt.beta1, 0.999))
-    optimizer_d = t.optim.Adam(netd.parameters(), opt.lr2, betas=(opt.beta1, 0.999))
+    optimizer_g = t.optim.RMSprop(netg.parameters(), opt.lr1, alpha= opt.beta1)
+    optimizer_d = t.optim.RMSprop(netd.parameters(), opt.lr2, alpha= opt.beta1)
+    for p in NetD.parameters(netd):
+        p.data.clamp_(-0.01, 0.01)
+    one = t.FloatTensor([1])
+    mone = -1 * one
     criterion = t.nn.BCELoss().to(device)
 
     # 真图片label为1，假图片label为0
     # noises为生成网络的输入
-    true_labels = t.ones(opt.batch_size).to(device)
-    fake_labels = t.zeros(opt.batch_size).to(device)
-    fix_noises = t.randn(opt.batch_size, opt.nz, 1, 1).to(device)
-    noises = t.randn(opt.batch_size, opt.nz, 1, 1).to(device)
+    true_labels = Variable(t.ones(opt.batch_size).to(device))
+    fake_labels = Variable(t.zeros(opt.batch_size).to(device))
+    fix_noises = Variable(t.randn(opt.batch_size, opt.nz, 1, 1).to(device))
+    noises = Variable(t.randn(opt.batch_size, opt.nz, 1, 1).to(device))
 
     errord_meter = AverageValueMeter()
     errorg_meter = AverageValueMeter()
@@ -111,23 +144,38 @@ def train(**kwargs):
         for ii, (img, _) in tqdm.tqdm(enumerate(dataloader)):
             real_img = img.to(device)
 
+            #real_imgs = Variable(t.from_numpy(real_img).cuda())
+            z = Variable(t.randn(opt.batch_size, opt.nz, 1, 1).to(device))
+
+            # Generate a batch of images
+            gen_imgs = netg(z)
+
             if ii % opt.d_every == 0:
                 # 训练判别器
                 optimizer_d.zero_grad()
                 ## 尽可能的把真图片判别为正确
                 output = netd(real_img)
                 error_d_real = criterion(output, true_labels)
-                error_d_real.backward()
+                #error_d_real = output
+                #error_d_real.backward()
 
                 ## 尽可能把假图片判别为错误
                 noises.data.copy_(t.randn(opt.batch_size, opt.nz, 1, 1))
                 fake_img = netg(noises).detach()  # 根据噪声生成假图
                 output = netd(fake_img)
                 error_d_fake = criterion(output, fake_labels)
-                error_d_fake.backward()
+                #error_d_fake=output
+               # error_d_fake.backward(mone)
                 optimizer_d.step()
 
-                error_d = error_d_fake + error_d_real
+                gradient_penalty = compute_gradient_penalty(netd, real_img.data, gen_imgs.data)
+
+
+                error_d = (error_d_fake + error_d_real) / 2 + (gradient_penalty * 10)
+                error_d.backward()
+                optimizer_d.step()
+
+                #error_d = error_d_fake + error_d_real
 
                 errord_meter.add(error_d.item())
 
@@ -183,7 +231,7 @@ def generate(**kwargs):
     for ii in indexs:
         result.append(fake_img.data[ii])
     # 保存图片
-    tv.utils.save_image(t.stack(result), '%s/%s_'%(opt.save_path, opt.save_new) + opt.gen_img, normalize=True, range=(-1, 1))
+    tv.utils.save_image(t.stack(result), '%s/%s————'%(opt.save_path, opt.save_new) + opt.gen_img, normalize=True, range=(-1, 1))
     #torchvision.utils.save_image(tensor, filename, nrow=8, padding=2, normalize=False, range=None, scale_each=False)
 
 if __name__ == '__main__':
@@ -192,5 +240,5 @@ if __name__ == '__main__':
     fire.Fire()
 
 
-#train()
-generate()
+train()
+#generate()
